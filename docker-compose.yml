@@ -1,0 +1,24 @@
+services:
+  vision:
+    build: .
+    image: vision-edge:latest
+    ports:
+      - "8000:8000"
+    environment:
+      LANES: cam0,cam1,cam2
+      BATCH_LANES: "2"
+      # demo knob: pretend the model costs 200ms/batch on CPU so that
+      # queueing / frame replacement become observable from the API.
+      # Set to "0" (or remove) for full-speed inference.
+      INFER_DELAY_MS: "200"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s

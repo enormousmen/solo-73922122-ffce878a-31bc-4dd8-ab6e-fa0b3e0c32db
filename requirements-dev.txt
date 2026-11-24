@@ -1,0 +1,4 @@
+-r requirements.txt
+onnx>=1.15        # only needed to regenerate app/model/classifier.onnx
+httpx>=0.27       # TestClient transport
+pytest>=8.0
