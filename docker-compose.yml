@@ -7,8 +7,12 @@ services:
     environment:
       LANES: cam0,cam1,cam2
       BATCH_LANES: "2"
+      # two inference channels share the single loaded CPU model;
+      # at most two batches are computed concurrently.
+      INFER_CHANNELS: "2"
       # demo knob: pretend the model costs 200ms/batch on CPU so that
       # queueing / frame replacement become observable from the API.
+      # Per-frame X-Infer-Delay-Ms headers override this for a batch.
       # Set to "0" (or remove) for full-speed inference.
       INFER_DELAY_MS: "200"
     restart: unless-stopped

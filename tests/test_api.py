@@ -14,12 +14,15 @@ def frame(seed: int) -> bytes:
     return bytes((seed + i) % 256 for i in range(4096))
 
 
-def post(client, lane, frame_no, body):
+def post(client, lane, frame_no, body, delay_ms=None):
+    headers = {"Content-Type": "application/octet-stream"}
+    if delay_ms is not None:
+        headers["X-Infer-Delay-Ms"] = str(delay_ms)
     return client.post(
         f"/cameras/{lane}/frames",
         params={"frame_no": frame_no},
         content=body,
-        headers={"Content-Type": "application/octet-stream"},
+        headers=headers,
     )
 
 
@@ -106,8 +109,12 @@ class ApiTest(unittest.TestCase):
         data = r.json()
         self.assertEqual(sorted(data["lanes"].keys()), sorted(LANES))
         self.assertEqual(data["batch_lanes"], 2)
+        self.assertEqual(data["channels"], 2)
         for lane in LANES:
-            self.assertIn("max_received", data["lanes"][lane])
+            st = data["lanes"][lane]
+            self.assertIn("max_received", st)
+            self.assertIn("in_flight", st)
+            self.assertIn("stale_frames", st)
 
     def test_08_batch_failure_keeps_result_and_continues(self):
         post(self.client, "cam2", 500, frame(500))
@@ -117,11 +124,11 @@ class ApiTest(unittest.TestCase):
         orig_infer = model.infer
         calls = {"n": 0}
 
-        async def flaky(images):
+        async def flaky(images, delay_ms=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("boom")
-            return await orig_infer(images)
+            return await orig_infer(images, delay_ms=delay_ms)
 
         model.infer = flaky
         try:
@@ -135,6 +142,57 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(res2["frame_no"], 502)
         finally:
             model.infer = orig_infer
+
+    def test_09_same_lane_newer_frame_publishes_first(self):
+        # controlled delays on one lane: slow frame 600, then fast frame 601.
+        # The free second channel must compute 601 first and publish it;
+        # 600 finishes later and must not overwrite the newer result.
+        r = post(self.client, "cam1", 600, frame(600), delay_ms=800)
+        self.assertEqual(r.status_code, 202)
+        # wait until frame 600 is actually in flight on channel 1
+        wait_lane_state(self.client, "cam1", "in_flight", 1)
+
+        r = post(self.client, "cam1", 601, frame(601), delay_ms=50)
+        self.assertEqual(r.status_code, 202)
+        self.assertTrue(r.json()["in_batch"])  # frame 600 still computing
+
+        # the newer frame is queryable while the slow older frame is running
+        res = wait_result(self.client, "cam1", want_frame=601, timeout=5)
+        self.assertEqual(res["frame_no"], 601)
+
+        # after the slow batch finishes the result must still be frame 601
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snap = self.client.get("/cameras").json()
+            st = snap["lanes"]["cam1"]
+            if st["in_flight"] == 0:
+                break
+            time.sleep(0.02)
+        snap = self.client.get("/cameras").json()
+        st = snap["lanes"]["cam1"]
+        self.assertEqual(st["in_flight"], 0)
+        self.assertFalse(st["in_batch"])
+        self.assertGreaterEqual(st["stale_frames"], 1)
+        res = self.client.get("/cameras/cam1/result").json()
+        self.assertEqual(res["frame_no"], 601)
+
+    def test_10_two_channels_run_batches_in_parallel(self):
+        # one slow frame occupies channel 1; a frame on another lane must
+        # still be computed promptly by channel 2.
+        post(self.client, "cam2", 700, frame(700), delay_ms=800)
+        wait_lane_state(self.client, "cam2", "in_flight", 1)
+        t0 = time.monotonic()
+        post(self.client, "cam0", 700, frame(700), delay_ms=50)
+        res = wait_result(self.client, "cam0", want_frame=700, timeout=5)
+        self.assertEqual(res["frame_no"], 700)
+        self.assertLess(time.monotonic() - t0, 1.5)  # did not wait 800ms batch
+        wait_result(self.client, "cam2", want_frame=700, timeout=5)
+
+    def test_11_delay_header_rejects_negative_and_oversize(self):
+        r = post(self.client, "cam0", 701, frame(701), delay_ms=-1)
+        self.assertEqual(r.status_code, 422)
+        r = post(self.client, "cam0", 702, frame(702), delay_ms=99999)
+        self.assertEqual(r.status_code, 422)
 
 
 if __name__ == "__main__":

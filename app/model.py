@@ -29,16 +29,33 @@ class OnnxClassifier:
         # demo knob: simulate a heavier CPU model so queueing is observable
         self._infer_delay_s = max(0, infer_delay_ms) / 1000.0
 
-    async def infer(self, images: list[bytes]) -> list[tuple[int, list[float]]]:
-        """Classify one batch of raw 64x64 grayscale frames."""
+    async def infer(
+        self,
+        images: list[bytes],
+        delay_ms: int | None = None,
+    ) -> list[tuple[int, list[float]]]:
+        """Classify one batch of raw 64x64 grayscale frames.
+
+        ``delay_ms`` overrides the instance-wide ``INFER_DELAY_MS`` knob for
+        this call only (used by the controlled-delay demo).
+        """
         if not images:
             return []
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._infer_sync, images)
+        return await loop.run_in_executor(
+            None, self._infer_sync, images, delay_ms
+        )
 
-    def _infer_sync(self, images: list[bytes]) -> list[tuple[int, list[float]]]:
-        if self._infer_delay_s:
-            time.sleep(self._infer_delay_s)  # occupies the worker thread only
+    def _infer_sync(
+        self,
+        images: list[bytes],
+        delay_ms: int | None = None,
+    ) -> list[tuple[int, list[float]]]:
+        delay_s = (
+            self._infer_delay_s if delay_ms is None else max(0, delay_ms) / 1000.0
+        )
+        if delay_s:
+            time.sleep(delay_s)  # occupies the worker thread only
         batch = np.stack([self._to_tensor(img) for img in images])
         logits = self._session.run(
             [self._output_name], {self._input_name: batch}
